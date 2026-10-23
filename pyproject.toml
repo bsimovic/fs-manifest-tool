@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fsmanifest"
+dynamic = ["version"]
+description = "Maintain and verify per-directory .manifest files of BLAKE3 hashes"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["blake3>=0.3"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+fsmanifest = "fsmanifest.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "fsmanifest.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
