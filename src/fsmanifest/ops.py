@@ -54,11 +54,13 @@ def walk_dirs(root: Path, rep: Reporter):
 def _hash_entry(path: Path, st: os.stat_result) -> Entry:
     # Record the mtime observed *before* hashing: if the file changes while it
     # is being read, the next sync sees a newer mtime and hashes it again.
-    return Entry(blake3=manifest.hash_file(path), mtime_ns=st.st_mtime_ns)
+    return Entry(blake3=manifest.hash_file(path), size=st.st_size, mtime_ns=st.st_mtime_ns)
 
 
 def _needs_hash(full: bool, old: Entry | None, st: os.stat_result) -> bool:
-    return full or old is None or st.st_mtime_ns > old.mtime_ns
+    # A size change is a sure sign of new content even if the mtime didn't move.
+    return (full or old is None or st.st_mtime_ns > old.mtime_ns
+            or st.st_size != old.size)
 
 
 def _update_entry(directory: Path, name: str, st: os.stat_result, old: Entry | None,
@@ -164,19 +166,25 @@ def verify_entry(path: Path, entry: Entry, rep: Reporter) -> None:
     if not path.is_file() or path.is_symlink():
         rep.item("missing", path, level=0, detail="not a regular file")
         return
-    try:
-        digest = manifest.hash_file(path)
-    except OSError as exc:
-        rep.error(f"{path}: {exc.strerror}")
-        return
-    if digest == entry.blake3:
-        rep.item("ok", path, level=2)
-    elif st.st_mtime_ns > entry.mtime_ns:
+    if entry.size is not None and st.st_size != entry.size:
+        # Different length means different content; no need to hash.
+        mismatch = f"size {st.st_size} != recorded {entry.size}"
+    else:
+        try:
+            digest = manifest.hash_file(path)
+        except OSError as exc:
+            rep.error(f"{path}: {exc.strerror}")
+            return
+        if digest == entry.blake3:
+            rep.item("ok", path, level=2)
+            return
+        mismatch = "hash mismatch"
+    if st.st_mtime_ns > entry.mtime_ns:
         # Content changed and so did the mtime: most likely a legitimate edit.
-        rep.item("modified", path, level=0, detail="changed since last sync")
+        rep.item("modified", path, level=0, detail=f"{mismatch}, changed since last sync")
     else:
         # Content changed but the mtime did not: silent corruption.
-        rep.item("corrupt", path, level=0, detail="hash mismatch, mtime unchanged")
+        rep.item("corrupt", path, level=0, detail=f"{mismatch}, mtime unchanged")
 
 
 def verify_directory(directory: Path, rep: Reporter) -> None:

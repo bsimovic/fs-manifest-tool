@@ -1,7 +1,7 @@
 # fsmanifest
 
 A small CLI that maintains a `.manifest` file in each directory, recording the
-BLAKE3 hash and modification time of every regular, non-hidden file directly in
+BLAKE3 hash, size and modification time of every regular, non-hidden file directly in
 that directory, and verifies files against it.
 
 ## Install
@@ -25,7 +25,7 @@ Each `PATH` may be a directory (processed recursively) or a single file.
 | Command     | Directory                                                                 | File                                                    |
 |-------------|---------------------------------------------------------------------------|---------------------------------------------------------|
 | `full-sync` | Rehash every file in the directory and all subdirectories; rewrite manifests; drop entries for deleted files. | Rehash the file and add/update its entry (creating the manifest if needed). |
-| `sync`      | Like `full-sync`, but only hash files with no entry or whose mtime is later than the recorded one. | Same, for one file.                             |
+| `sync`      | Like `full-sync`, but only hash files with no entry, whose mtime is later than the recorded one, or whose size differs. | Same, for one file.                             |
 | `verify`    | Check every entry of every manifest found recursively.                    | Check only that file's entry.                           |
 
 Details:
@@ -41,8 +41,8 @@ Details:
 `verify` reports:
 
 - `MISSING` – the file in the manifest no longer exists.
-- `MODIFIED` – hash differs and the mtime is newer: probably an edit, run `sync`.
-- `CORRUPT` – hash differs but the mtime is unchanged: likely silent corruption.
+- `MODIFIED` – size or hash differs and the mtime is newer: probably an edit, run `sync`.
+- `CORRUPT` – size or hash differs but the mtime is unchanged: likely silent corruption.
 - `UNTRACKED` – a file with no entry (informational, doesn't fail).
 
 Use `-v` to also list unchanged/OK files, `-q` to print only problems.
@@ -56,15 +56,18 @@ JSON, keys sorted by filename:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "algorithm": "blake3",
   "files": {
-    "photo.jpg": {"blake3": "<64 hex chars>", "mtime_ns": 1729700000000000000}
+    "photo.jpg": {"blake3": "<64 hex chars>", "size": 52341, "mtime_ns": 1729700000000000000}
   }
 }
 ```
 
-`mtime_ns` is the modification time in nanoseconds, captured right before hashing.
+`size` is the file's length in bytes (apparent size, not size on disk) and
+`mtime_ns` its modification time in nanoseconds, both captured right before
+hashing. Version 1 manifests (no `size`) are still read; `verify` works on them
+and the next `sync` rehashes their entries and rewrites them as version 2.
 
 ## Tests
 
