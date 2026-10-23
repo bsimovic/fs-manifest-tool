@@ -4,15 +4,20 @@ A manifest lives in a directory and describes the regular, non-hidden files
 directly inside it (not in subdirectories). It is a JSON document:
 
     {
-      "version": 1,
+      "version": 2,
       "algorithm": "blake3",
       "files": {
-        "photo.jpg": {"blake3": "<64 hex chars>", "mtime_ns": 1729700000000000000}
+        "photo.jpg": {"blake3": "<64 hex chars>", "size": 52341,
+                      "mtime_ns": 1729700000000000000}
       }
     }
 
-`mtime_ns` is the file's modification time in nanoseconds since the epoch,
-as reported by the filesystem when the hash was computed.
+`size` is the file's length in bytes (its apparent size, not the space it
+occupies on disk) and `mtime_ns` its modification time in nanoseconds since
+the epoch, both as reported by the filesystem when the hash was computed.
+
+Version 1 manifests, which lack `size`, are still read; their entries get
+`size = None` and are rehashed by the next sync.
 """
 
 from __future__ import annotations
@@ -26,7 +31,8 @@ from pathlib import Path
 import blake3
 
 MANIFEST_NAME = ".manifest"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+READABLE_VERSIONS = (1, 2)
 CHUNK_SIZE = 1 << 20
 
 
@@ -37,6 +43,7 @@ class ManifestError(Exception):
 @dataclass
 class Entry:
     blake3: str
+    size: int | None
     mtime_ns: int
 
 
@@ -73,11 +80,15 @@ def load(directory: Path) -> dict[str, Entry] | None:
     except (OSError, ValueError) as exc:
         raise ManifestError(f"{path}: cannot read manifest: {exc}") from exc
 
-    if not isinstance(data, dict) or data.get("version") != FORMAT_VERSION:
+    if not isinstance(data, dict) or data.get("version") not in READABLE_VERSIONS:
         raise ManifestError(f"{path}: unsupported manifest format")
     try:
         return {
-            name: Entry(blake3=str(e["blake3"]), mtime_ns=int(e["mtime_ns"]))
+            name: Entry(
+                blake3=str(e["blake3"]),
+                size=int(e["size"]) if "size" in e else None,
+                mtime_ns=int(e["mtime_ns"]),
+            )
             for name, e in data["files"].items()
         }
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -94,7 +105,7 @@ def save(directory: Path, entries: dict[str, Entry]) -> None:
         "version": FORMAT_VERSION,
         "algorithm": "blake3",
         "files": {
-            name: {"blake3": e.blake3, "mtime_ns": e.mtime_ns}
+            name: {"blake3": e.blake3, "size": e.size, "mtime_ns": e.mtime_ns}
             for name, e in sorted(entries.items())
         },
     }

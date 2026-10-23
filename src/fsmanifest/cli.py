@@ -9,6 +9,7 @@ from . import __version__, manifest, ops
 
 EXIT_OK = 0
 EXIT_VERIFY_FAILED = 1
+EXIT_NOT_FOUND = 1
 EXIT_ERROR = 2
 
 
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("full-sync", "rehash every file and rewrite manifests"),
         ("sync", "hash only new files and files modified since the last sync"),
         ("verify", "check files against their recorded hashes"),
+        ("list", "print the names, sizes and hashes recorded in manifests"),
     ]:
         p = sub.add_parser(name, help=help_text, description=help_text)
         p.add_argument("paths", nargs="+", type=Path, metavar="PATH",
@@ -49,12 +51,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args.command == "verify":
             ops.verify(path, rep)
+        elif args.command == "list":
+            ops.list_entries(path, rep)
         else:
             ops.sync(path, full=args.command == "full-sync", rep=rep)
 
-    rep.summary()
+    if args.command != "list":
+        rep.summary()
     if rep.errors:
         return EXIT_ERROR
     if args.command == "verify" and any(rep.counts[s] for s in ops.VERIFY_FAILURES):
         return EXIT_VERIFY_FAILED
+    if args.command == "list" and rep.counts["not found"]:
+        return EXIT_NOT_FOUND
     return EXIT_OK

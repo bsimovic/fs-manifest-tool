@@ -54,11 +54,13 @@ def walk_dirs(root: Path, rep: Reporter):
 def _hash_entry(path: Path, st: os.stat_result) -> Entry:
     # Record the mtime observed *before* hashing: if the file changes while it
     # is being read, the next sync sees a newer mtime and hashes it again.
-    return Entry(blake3=manifest.hash_file(path), mtime_ns=st.st_mtime_ns)
+    return Entry(blake3=manifest.hash_file(path), size=st.st_size, mtime_ns=st.st_mtime_ns)
 
 
 def _needs_hash(full: bool, old: Entry | None, st: os.stat_result) -> bool:
-    return full or old is None or st.st_mtime_ns > old.mtime_ns
+    # A size change is a sure sign of new content even if the mtime didn't move.
+    return (full or old is None or st.st_mtime_ns > old.mtime_ns
+            or st.st_size != old.size)
 
 
 def _update_entry(directory: Path, name: str, st: os.stat_result, old: Entry | None,
@@ -164,19 +166,25 @@ def verify_entry(path: Path, entry: Entry, rep: Reporter) -> None:
     if not path.is_file() or path.is_symlink():
         rep.item("missing", path, level=0, detail="not a regular file")
         return
-    try:
-        digest = manifest.hash_file(path)
-    except OSError as exc:
-        rep.error(f"{path}: {exc.strerror}")
-        return
-    if digest == entry.blake3:
-        rep.item("ok", path, level=2)
-    elif st.st_mtime_ns > entry.mtime_ns:
+    if entry.size is not None and st.st_size != entry.size:
+        # Different length means different content; no need to hash.
+        mismatch = f"size {st.st_size} != recorded {entry.size}"
+    else:
+        try:
+            digest = manifest.hash_file(path)
+        except OSError as exc:
+            rep.error(f"{path}: {exc.strerror}")
+            return
+        if digest == entry.blake3:
+            rep.item("ok", path, level=2)
+            return
+        mismatch = "hash mismatch"
+    if st.st_mtime_ns > entry.mtime_ns:
         # Content changed and so did the mtime: most likely a legitimate edit.
-        rep.item("modified", path, level=0, detail="changed since last sync")
+        rep.item("modified", path, level=0, detail=f"{mismatch}, changed since last sync")
     else:
         # Content changed but the mtime did not: silent corruption.
-        rep.item("corrupt", path, level=0, detail="hash mismatch, mtime unchanged")
+        rep.item("corrupt", path, level=0, detail=f"{mismatch}, mtime unchanged")
 
 
 def verify_directory(directory: Path, rep: Reporter) -> None:
@@ -216,3 +224,108 @@ def verify(target: Path, rep: Reporter) -> None:
 
 
 VERIFY_FAILURES = ("missing", "modified", "corrupt")
+
+
+def _format_size(size: int | None) -> str:
+    return "?" if size is None else f"{size:,}"
+
+
+def _manifest_tree(directory: Path, rep: Reporter):
+    """Return (entries, children) for `directory`, or None if no manifest is at or below it.
+
+    `children` is a list of (name, subtree) for non-hidden subdirectories that
+    themselves contain a manifest somewhere below them.
+    """
+    try:
+        entries = manifest.load(directory)
+    except ManifestError as exc:
+        rep.error(str(exc))
+        entries = None
+    try:
+        with os.scandir(directory) as it:
+            subdirs = sorted(e.name for e in it
+                             if not manifest.is_hidden(e.name) and e.is_dir(follow_symlinks=False))
+    except OSError as exc:
+        rep.error(f"{directory}: {exc.strerror}")
+        subdirs = []
+    children = []
+    for name in subdirs:
+        subtree = _manifest_tree(directory / name, rep)
+        if subtree is not None:
+            children.append((name, subtree))
+    if entries is None and not children:
+        return None
+    return entries or {}, children
+
+
+def _entry_status(path: Path, entry: Entry) -> str:
+    """Cheap stat-only comparison of a file against its manifest entry (no hashing)."""
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return "MISSING"
+    except OSError as exc:
+        return f"ERROR ({exc.strerror})"
+    if not path.is_file() or path.is_symlink():
+        return "MISSING (not a regular file)"
+    problems = []
+    if st.st_mtime_ns > entry.mtime_ns:
+        problems.append("NEWER")
+    if entry.size is not None and st.st_size != entry.size:
+        problems.append(f"SIZE MISMATCH (now {_format_size(st.st_size)})")
+    return ", ".join(problems)
+
+
+def _entry_row(label: str, path: Path, entry: Entry) -> tuple:
+    return (label, _format_size(entry.size), _entry_status(path, entry))
+
+
+def _tree_rows(tree, directory: Path, prefix: str, rows: list) -> None:
+    entries, children = tree
+    items = [(name, entry) for name, entry in sorted(entries.items())]
+    items += [(name + "/", subtree) for name, subtree in children]
+    for i, (name, item) in enumerate(items):
+        last = i == len(items) - 1
+        label = prefix + ("└── " if last else "├── ") + name
+        if isinstance(item, Entry):
+            rows.append(_entry_row(label, directory / name, item))
+        else:
+            rows.append((label, None, ""))
+            _tree_rows(item, directory / name.rstrip("/"),
+                       prefix + ("    " if last else "│   "), rows)
+
+
+def _print_rows(rows: list, rep: Reporter) -> None:
+    # Directory rows (size None) don't count towards column widths.
+    files = [r for r in rows if r[1] is not None]
+    name_w = max((len(r[0]) for r in files), default=0)
+    size_w = max((len(r[1]) for r in files), default=0)
+    for label, size, status in rows:
+        line = label if size is None else f"{label:<{name_w}}  {size:>{size_w}}  {status}"
+        print(line.rstrip(), file=rep.out)
+
+
+def list_entries(target: Path, rep: Reporter) -> None:
+    """Print what the manifests record, flagging files whose mtime or size changed.
+
+    Read-only: never hashes files or touches manifests.
+    """
+    if target.is_dir():
+        tree = _manifest_tree(target, rep)
+        if tree is None:
+            rep.item("not found", target, level=0, detail="no manifests")
+            return
+        rows = [(str(target).rstrip(os.sep) + os.sep, None, "")]
+        _tree_rows(tree, target, "", rows)
+        _print_rows(rows, rep)
+        return
+    try:
+        entries = manifest.load(target.parent) or {}
+    except ManifestError as exc:
+        rep.error(str(exc))
+        return
+    entry = entries.get(target.name)
+    if entry is None:
+        rep.item("not found", target, level=0, detail="no manifest entry")
+    else:
+        _print_rows([_entry_row(str(target), target, entry)], rep)

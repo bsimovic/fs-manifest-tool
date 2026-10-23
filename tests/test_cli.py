@@ -42,6 +42,7 @@ def test_directory_creates_manifests(tree, cmd):
     assert set(files) == {"a.txt"}
     assert files["a.txt"]["blake3"] == digest(b"aaa")
     assert files["a.txt"]["mtime_ns"] == (tree / "a.txt").stat().st_mtime_ns
+    assert files["a.txt"]["size"] == 3
     assert set(read_manifest(tree / "sub")) == {"b.txt"}
     assert set(read_manifest(tree / "sub" / "deep")) == {"c.txt"}
     assert not (tree / "empty" / ".manifest").exists()
@@ -82,7 +83,7 @@ def test_sync_rehashes_newer_files(tree):
     write(f, b"zzz", mtime_ns=2_000_000_000)
     main(["sync", str(tree)])
     entry = read_manifest(tree)["a.txt"]
-    assert entry == {"blake3": digest(b"zzz"), "mtime_ns": 2_000_000_000}
+    assert entry == {"blake3": digest(b"zzz"), "size": 3, "mtime_ns": 2_000_000_000}
 
 
 @pytest.mark.parametrize("cmd", ["full-sync", "sync"])
@@ -155,3 +156,102 @@ def test_corrupt_manifest_is_regenerated(tree):
     assert main(["sync", str(tree)]) == 2
     assert set(read_manifest(tree)) == {"a.txt"}
     assert main(["verify", str(tree)]) == 0
+
+
+def test_size_is_apparent_size_of_sparse_file(tmp_path):
+    f = tmp_path / "sparse.bin"
+    with open(f, "wb") as fh:
+        fh.truncate(10 * 1024 * 1024)
+    main(["sync", str(tmp_path)])
+    assert read_manifest(tmp_path)["sparse.bin"]["size"] == 10 * 1024 * 1024
+
+
+def test_sync_rehashes_on_size_change_with_same_mtime(tree):
+    f = write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    write(f, b"longer", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    assert read_manifest(tree)["a.txt"] == {
+        "blake3": digest(b"longer"), "size": 6, "mtime_ns": 1_000_000_000}
+
+
+def test_verify_reports_size_mismatch(tree, capsys):
+    f = write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    write(f, b"truncated-and-longer", mtime_ns=1_000_000_000)
+    capsys.readouterr()
+    assert main(["verify", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "CORRUPT" in out and "size 20 != recorded 3" in out
+
+
+def test_reads_v1_manifest_and_upgrades(tree):
+    f = write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    (tree / ".manifest").write_text(json.dumps({
+        "version": 1, "algorithm": "blake3",
+        "files": {"a.txt": {"blake3": digest(b"aaa"), "mtime_ns": 1_000_000_000}},
+    }))
+    assert main(["verify", str(tree)]) == 0
+    assert main(["sync", str(f)]) == 0
+    data = json.loads((tree / ".manifest").read_text())
+    assert data["version"] == 2
+    assert data["files"]["a.txt"]["size"] == 3
+
+
+def test_list_directory_tree(tree, capsys):
+    main(["sync", str(tree)])
+    write(tree / "nomanifest" / "x.txt", b"x")   # created after sync: not listed
+    capsys.readouterr()
+    assert main(["list", str(tree)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [
+        str(tree) + "/",
+        "├── a.txt          3",
+        "└── sub/",
+        "    ├── b.txt      3",
+        "    └── deep/",
+        "        └── c.txt  3",
+    ]
+    assert not (tree / "nomanifest" / ".manifest").exists()
+
+
+def test_list_reports_newer_size_mismatch_and_missing(tree, capsys):
+    write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    write(tree / "sub" / "b.txt", b"bbb", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    write(tree / "a.txt", b"aaaa", mtime_ns=1_000_000_000)          # size only
+    write(tree / "sub" / "b.txt", b"xyz", mtime_ns=2_000_000_000)   # newer only
+    (tree / "sub" / "deep" / "c.txt").unlink()
+    capsys.readouterr()
+    assert main(["list", str(tree)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].endswith("  3  SIZE MISMATCH (now 4)")
+    assert lines[3].endswith("  3  NEWER")
+    assert lines[5].endswith("  3  MISSING")
+    write(tree / "sub" / "b.txt", b"longer", mtime_ns=3_000_000_000)
+    assert main(["list", str(tree / "sub" / "b.txt")]) == 0
+    assert capsys.readouterr().out.strip().endswith("NEWER, SIZE MISMATCH (now 6)")
+
+
+def test_list_does_not_rehash(tree, capsys):
+    f = write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    write(f, b"zzz", mtime_ns=1_000_000_000)   # same size and mtime
+    capsys.readouterr()
+    assert main(["list", str(f)]) == 0
+    assert capsys.readouterr().out.strip() == f"{f}  3"
+
+
+def test_list_single_file(tree, capsys):
+    main(["sync", str(tree)])
+    capsys.readouterr()
+    assert main(["list", str(tree / "sub" / "b.txt")]) == 0
+    assert capsys.readouterr().out.strip() == f"{tree / 'sub' / 'b.txt'}  3"
+
+
+def test_list_not_found_generates_nothing(tree, capsys):
+    assert main(["list", str(tree / "a.txt")]) == 1
+    assert "NOT FOUND" in capsys.readouterr().out
+    assert main(["list", str(tree)]) == 1
+    assert "NOT FOUND" in capsys.readouterr().out
+    assert not list(tree.rglob(".manifest"))
