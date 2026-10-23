@@ -204,32 +204,49 @@ def test_list_directory_tree(tree, capsys):
     capsys.readouterr()
     assert main(["list", str(tree)]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == str(tree) + "/"
-    assert lines[1].startswith("├── a.txt") and lines[1].endswith(digest(b"aaa"))
-    assert " 3  " in lines[1]
-    assert lines[2] == "└── sub/"
-    assert lines[3].startswith("    ├── b.txt")
-    assert lines[4] == "    └── deep/"
-    assert lines[5].startswith("        └── c.txt")
-    assert len(lines) == 6
+    assert lines == [
+        str(tree) + "/",
+        "├── a.txt          3",
+        "└── sub/",
+        "    ├── b.txt      3",
+        "    └── deep/",
+        "        └── c.txt  3",
+    ]
     assert not (tree / "nomanifest" / ".manifest").exists()
 
 
-def test_list_shows_entries_for_deleted_files(tree, capsys):
+def test_list_reports_newer_size_mismatch_and_missing(tree, capsys):
+    write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    write(tree / "sub" / "b.txt", b"bbb", mtime_ns=1_000_000_000)
     main(["sync", str(tree)])
-    (tree / "a.txt").unlink()
+    write(tree / "a.txt", b"aaaa", mtime_ns=1_000_000_000)          # size only
+    write(tree / "sub" / "b.txt", b"xyz", mtime_ns=2_000_000_000)   # newer only
+    (tree / "sub" / "deep" / "c.txt").unlink()
     capsys.readouterr()
-    assert main(["list", str(tree / "a.txt")]) == 0
-    assert digest(b"aaa") in capsys.readouterr().out
+    assert main(["list", str(tree)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].endswith("  3  SIZE MISMATCH (now 4)")
+    assert lines[3].endswith("  3  NEWER")
+    assert lines[5].endswith("  3  MISSING")
+    write(tree / "sub" / "b.txt", b"longer", mtime_ns=3_000_000_000)
+    assert main(["list", str(tree / "sub" / "b.txt")]) == 0
+    assert capsys.readouterr().out.strip().endswith("NEWER, SIZE MISMATCH (now 6)")
+
+
+def test_list_does_not_rehash(tree, capsys):
+    f = write(tree / "a.txt", b"aaa", mtime_ns=1_000_000_000)
+    main(["sync", str(tree)])
+    write(f, b"zzz", mtime_ns=1_000_000_000)   # same size and mtime
+    capsys.readouterr()
+    assert main(["list", str(f)]) == 0
+    assert capsys.readouterr().out.strip() == f"{f}  3"
 
 
 def test_list_single_file(tree, capsys):
     main(["sync", str(tree)])
     capsys.readouterr()
     assert main(["list", str(tree / "sub" / "b.txt")]) == 0
-    out = capsys.readouterr().out.strip()
-    assert out.startswith(str(tree / "sub" / "b.txt"))
-    assert out.endswith(digest(b"bbb"))
+    assert capsys.readouterr().out.strip() == f"{tree / 'sub' / 'b.txt'}  3"
 
 
 def test_list_not_found_generates_nothing(tree, capsys):

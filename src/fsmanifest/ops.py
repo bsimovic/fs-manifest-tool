@@ -258,7 +258,29 @@ def _manifest_tree(directory: Path, rep: Reporter):
     return entries or {}, children
 
 
-def _tree_rows(tree, prefix: str, rows: list) -> None:
+def _entry_status(path: Path, entry: Entry) -> str:
+    """Cheap stat-only comparison of a file against its manifest entry (no hashing)."""
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return "MISSING"
+    except OSError as exc:
+        return f"ERROR ({exc.strerror})"
+    if not path.is_file() or path.is_symlink():
+        return "MISSING (not a regular file)"
+    problems = []
+    if st.st_mtime_ns > entry.mtime_ns:
+        problems.append("NEWER")
+    if entry.size is not None and st.st_size != entry.size:
+        problems.append(f"SIZE MISMATCH (now {_format_size(st.st_size)})")
+    return ", ".join(problems)
+
+
+def _entry_row(label: str, path: Path, entry: Entry) -> tuple:
+    return (label, _format_size(entry.size), _entry_status(path, entry))
+
+
+def _tree_rows(tree, directory: Path, prefix: str, rows: list) -> None:
     entries, children = tree
     items = [(name, entry) for name, entry in sorted(entries.items())]
     items += [(name + "/", subtree) for name, subtree in children]
@@ -266,31 +288,35 @@ def _tree_rows(tree, prefix: str, rows: list) -> None:
         last = i == len(items) - 1
         label = prefix + ("└── " if last else "├── ") + name
         if isinstance(item, Entry):
-            rows.append((label, _format_size(item.size), item.blake3))
+            rows.append(_entry_row(label, directory / name, item))
         else:
-            rows.append((label, "", ""))
-            _tree_rows(item, prefix + ("    " if last else "│   "), rows)
+            rows.append((label, None, ""))
+            _tree_rows(item, directory / name.rstrip("/"),
+                       prefix + ("    " if last else "│   "), rows)
 
 
 def _print_rows(rows: list, rep: Reporter) -> None:
-    # Directory rows have no size/hash and don't count towards column widths.
-    files = [r for r in rows if r[2]]
+    # Directory rows (size None) don't count towards column widths.
+    files = [r for r in rows if r[1] is not None]
     name_w = max((len(r[0]) for r in files), default=0)
     size_w = max((len(r[1]) for r in files), default=0)
-    for label, size, digest in rows:
-        line = f"{label:<{name_w}}  {size:>{size_w}}  {digest}" if digest else label
+    for label, size, status in rows:
+        line = label if size is None else f"{label:<{name_w}}  {size:>{size_w}}  {status}"
         print(line.rstrip(), file=rep.out)
 
 
 def list_entries(target: Path, rep: Reporter) -> None:
-    """Print what the manifests record; never touches or creates manifests."""
+    """Print what the manifests record, flagging files whose mtime or size changed.
+
+    Read-only: never hashes files or touches manifests.
+    """
     if target.is_dir():
         tree = _manifest_tree(target, rep)
         if tree is None:
             rep.item("not found", target, level=0, detail="no manifests")
             return
-        rows = [(str(target).rstrip(os.sep) + os.sep, "", "")]
-        _tree_rows(tree, "", rows)
+        rows = [(str(target).rstrip(os.sep) + os.sep, None, "")]
+        _tree_rows(tree, target, "", rows)
         _print_rows(rows, rep)
         return
     try:
@@ -302,4 +328,4 @@ def list_entries(target: Path, rep: Reporter) -> None:
     if entry is None:
         rep.item("not found", target, level=0, detail="no manifest entry")
     else:
-        _print_rows([(str(target), _format_size(entry.size), entry.blake3)], rep)
+        _print_rows([_entry_row(str(target), target, entry)], rep)
