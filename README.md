@@ -18,6 +18,7 @@ Requires Python 3.9+ and the [`blake3`](https://pypi.org/project/blake3/) packag
 fsmanifest [-v | -q] full-sync PATH...
 fsmanifest [-v | -q] sync      PATH...
 fsmanifest [-v | -q] verify    PATH...
+fsmanifest           list      PATH...
 ```
 
 Each `PATH` may be a directory (processed recursively) or a single file.
@@ -27,6 +28,7 @@ Each `PATH` may be a directory (processed recursively) or a single file.
 | `full-sync` | Rehash every file in the directory and all subdirectories; rewrite manifests; drop entries for deleted files. | Rehash the file and add/update its entry (creating the manifest if needed). |
 | `sync`      | Like `full-sync`, but only hash files with no entry, whose mtime is later than the recorded one, or whose size differs. | Same, for one file.                             |
 | `verify`    | Check every entry of every manifest found recursively.                    | Check only that file's entry.                           |
+| `list`      | Print a tree of the names, sizes and hashes recorded in the manifests found recursively. | Print only that file's entry.          |
 
 Details:
 
@@ -45,9 +47,26 @@ Details:
 - `CORRUPT` – size or hash differs but the mtime is unchanged: likely silent corruption.
 - `UNTRACKED` – a file with no entry (informational, doesn't fail).
 
+`list` only reads manifests: it never hashes or creates anything, and shows
+what is recorded (including entries for files deleted since the last sync).
+Directories with no manifest at or below them are omitted. A file with no entry,
+or a directory tree with no manifests, is reported as `NOT FOUND`:
+
+```
+$ fsmanifest list photos
+photos/
+├── a.txt              3  0b8b60248fad7ac6dfac221b7e01a8b91c772421a15b387dd1fb2d6a94aee438
+└── sub/
+    ├── big.bin  123,456  251218e4e5d26661cc32f2271e79fb0677033aaded7a353b57eaa7ee8537c8ca
+    └── deep/
+        └── c          2  d1cd1ec45291d06cdde016568971990c7e4da895f2e5a8a705d4feeb79578a69
+```
+
+Sizes are in bytes; `?` marks a version 1 entry that has no recorded size yet.
+
 Use `-v` to also list unchanged/OK files, `-q` to print only problems.
 
-Exit codes: `0` success, `1` verification failures, `2` errors (unreadable
+Exit codes: `0` success, `1` verification failures (or `list` found nothing), `2` errors (unreadable
 files, missing paths, bad manifests, …).
 
 ## Manifest format

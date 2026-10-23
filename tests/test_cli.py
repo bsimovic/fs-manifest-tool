@@ -196,3 +196,45 @@ def test_reads_v1_manifest_and_upgrades(tree):
     data = json.loads((tree / ".manifest").read_text())
     assert data["version"] == 2
     assert data["files"]["a.txt"]["size"] == 3
+
+
+def test_list_directory_tree(tree, capsys):
+    main(["sync", str(tree)])
+    write(tree / "nomanifest" / "x.txt", b"x")   # created after sync: not listed
+    capsys.readouterr()
+    assert main(["list", str(tree)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == str(tree) + "/"
+    assert lines[1].startswith("├── a.txt") and lines[1].endswith(digest(b"aaa"))
+    assert " 3  " in lines[1]
+    assert lines[2] == "└── sub/"
+    assert lines[3].startswith("    ├── b.txt")
+    assert lines[4] == "    └── deep/"
+    assert lines[5].startswith("        └── c.txt")
+    assert len(lines) == 6
+    assert not (tree / "nomanifest" / ".manifest").exists()
+
+
+def test_list_shows_entries_for_deleted_files(tree, capsys):
+    main(["sync", str(tree)])
+    (tree / "a.txt").unlink()
+    capsys.readouterr()
+    assert main(["list", str(tree / "a.txt")]) == 0
+    assert digest(b"aaa") in capsys.readouterr().out
+
+
+def test_list_single_file(tree, capsys):
+    main(["sync", str(tree)])
+    capsys.readouterr()
+    assert main(["list", str(tree / "sub" / "b.txt")]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith(str(tree / "sub" / "b.txt"))
+    assert out.endswith(digest(b"bbb"))
+
+
+def test_list_not_found_generates_nothing(tree, capsys):
+    assert main(["list", str(tree / "a.txt")]) == 1
+    assert "NOT FOUND" in capsys.readouterr().out
+    assert main(["list", str(tree)]) == 1
+    assert "NOT FOUND" in capsys.readouterr().out
+    assert not list(tree.rglob(".manifest"))

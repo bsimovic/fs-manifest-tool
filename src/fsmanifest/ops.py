@@ -224,3 +224,82 @@ def verify(target: Path, rep: Reporter) -> None:
 
 
 VERIFY_FAILURES = ("missing", "modified", "corrupt")
+
+
+def _format_size(size: int | None) -> str:
+    return "?" if size is None else f"{size:,}"
+
+
+def _manifest_tree(directory: Path, rep: Reporter):
+    """Return (entries, children) for `directory`, or None if no manifest is at or below it.
+
+    `children` is a list of (name, subtree) for non-hidden subdirectories that
+    themselves contain a manifest somewhere below them.
+    """
+    try:
+        entries = manifest.load(directory)
+    except ManifestError as exc:
+        rep.error(str(exc))
+        entries = None
+    try:
+        with os.scandir(directory) as it:
+            subdirs = sorted(e.name for e in it
+                             if not manifest.is_hidden(e.name) and e.is_dir(follow_symlinks=False))
+    except OSError as exc:
+        rep.error(f"{directory}: {exc.strerror}")
+        subdirs = []
+    children = []
+    for name in subdirs:
+        subtree = _manifest_tree(directory / name, rep)
+        if subtree is not None:
+            children.append((name, subtree))
+    if entries is None and not children:
+        return None
+    return entries or {}, children
+
+
+def _tree_rows(tree, prefix: str, rows: list) -> None:
+    entries, children = tree
+    items = [(name, entry) for name, entry in sorted(entries.items())]
+    items += [(name + "/", subtree) for name, subtree in children]
+    for i, (name, item) in enumerate(items):
+        last = i == len(items) - 1
+        label = prefix + ("└── " if last else "├── ") + name
+        if isinstance(item, Entry):
+            rows.append((label, _format_size(item.size), item.blake3))
+        else:
+            rows.append((label, "", ""))
+            _tree_rows(item, prefix + ("    " if last else "│   "), rows)
+
+
+def _print_rows(rows: list, rep: Reporter) -> None:
+    # Directory rows have no size/hash and don't count towards column widths.
+    files = [r for r in rows if r[2]]
+    name_w = max((len(r[0]) for r in files), default=0)
+    size_w = max((len(r[1]) for r in files), default=0)
+    for label, size, digest in rows:
+        line = f"{label:<{name_w}}  {size:>{size_w}}  {digest}" if digest else label
+        print(line.rstrip(), file=rep.out)
+
+
+def list_entries(target: Path, rep: Reporter) -> None:
+    """Print what the manifests record; never touches or creates manifests."""
+    if target.is_dir():
+        tree = _manifest_tree(target, rep)
+        if tree is None:
+            rep.item("not found", target, level=0, detail="no manifests")
+            return
+        rows = [(str(target).rstrip(os.sep) + os.sep, "", "")]
+        _tree_rows(tree, "", rows)
+        _print_rows(rows, rep)
+        return
+    try:
+        entries = manifest.load(target.parent) or {}
+    except ManifestError as exc:
+        rep.error(str(exc))
+        return
+    entry = entries.get(target.name)
+    if entry is None:
+        rep.item("not found", target, level=0, detail="no manifest entry")
+    else:
+        _print_rows([(str(target), _format_size(entry.size), entry.blake3)], rep)
